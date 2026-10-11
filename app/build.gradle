@@ -23,6 +23,9 @@ android {
             storePassword 'android'
             keyAlias 'androiddebugkey'
             keyPassword 'android'
+            // Eski (v1) + yeni (v2) imza birlikte: bazı üretici kurulum ekranları v1 de bekliyor
+            enableV1Signing true
+            enableV2Signing true
         }
     }
 

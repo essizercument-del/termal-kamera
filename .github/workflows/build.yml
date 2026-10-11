@@ -1,0 +1,44 @@
+name: APK Derle
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: APK derle
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: APK'yı adlandır
+        run: cp app/build/outputs/apk/debug/app-debug.apk termal-kamera-tani.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termal-kamera-tani
+          path: termal-kamera-tani.apk
+
+      - name: Sabit indirme bağlantısına yükle (Releases → son-surum)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete son-surum -y --cleanup-tag || true
+          gh release create son-surum termal-kamera-tani.apk \
+            --title "Son sürüm (derleme #${{ github.run_number }})" \
+            --notes "Otomatik derleme. Telefondan indirip kur: termal-kamera-tani.apk"

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fluke kamera: VID 0x0f7e = 3966 -->
+    <usb-device vendor-id="3966" />
+    <!-- Yedek: herhangi bir UVC (video sınıfı 14) cihaz -->
+    <usb-device class="14" />
+</resources>

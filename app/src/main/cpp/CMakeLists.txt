@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.18)
+project(uvciso C)
+add_library(uvciso SHARED uvciso.c)
+find_library(log-lib log)
+target_link_libraries(uvciso ${log-lib})

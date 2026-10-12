@@ -13,7 +13,16 @@ android {
         minSdk 24
         targetSdk 34
         versionCode runNo
-        versionName "tani-0.1." + runNo
+        versionName "tani-0.2." + runNo
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+        }
     }
 
     // Sabit imza anahtarı: her yeni derleme eskisinin üzerine kurulabilsin

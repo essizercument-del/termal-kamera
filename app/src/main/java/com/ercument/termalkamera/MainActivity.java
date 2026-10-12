@@ -24,6 +24,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -51,6 +52,10 @@ public class MainActivity extends Activity {
     private final StringBuilder log = new StringBuilder();
     private long usbRequestTime;
     private boolean receiverRegistered;
+    private TextView tempView, statView;
+    private ImageView imgThermal, imgImage;
+    private Button liveBtn;
+    private volatile boolean live, busy;
     private final SimpleDateFormat tf = new SimpleDateFormat("HH:mm:ss", Locale.US);
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
@@ -105,6 +110,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        live = false;
         if (receiverRegistered) {
             try { unregisterReceiver(usbReceiver); } catch (Throwable ignored) {}
         }
@@ -124,15 +130,36 @@ public class MainActivity extends Activity {
         hint.setTextSize(13);
         root.addView(hint);
 
-        LinearLayout r1 = row(), r2 = row();
+        LinearLayout r1 = row(), r2 = row(), r3 = row();
         addBtn(r1, "1. Tara", v -> scan());
         addBtn(r1, "2. Kamera izni", v -> requestCameraPerm());
         addBtn(r1, "3. USB izni", v -> requestUsbPerm());
         addBtn(r2, "4. Aç ve oku", v -> openAndRead());
         addBtn(r2, "Paylaş", v -> share());
         addBtn(r2, "Kopyala", v -> copy());
+        addBtn(r3, "5. Sıcaklık oku", v -> readTempOnce());
+        liveBtn = addBtn(r3, "6. Canlı ▶", v -> toggleLive());
         root.addView(r1);
         root.addView(r2);
+        root.addView(r3);
+
+        tempView = new TextView(this);
+        tempView.setTextSize(30);
+        tempView.setTypeface(Typeface.DEFAULT_BOLD);
+        tempView.setText("Merkez: — °C");
+        root.addView(tempView);
+        statView = new TextView(this);
+        statView.setTextSize(13);
+        root.addView(statView);
+
+        LinearLayout imgs = row();
+        imgThermal = new ImageView(this);
+        imgThermal.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        imgImage = new ImageView(this);
+        imgImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        imgs.addView(imgThermal, new LinearLayout.LayoutParams(0, dp(140), 1f));
+        imgs.addView(imgImage, new LinearLayout.LayoutParams(0, dp(140), 1f));
+        root.addView(imgs);
 
         scroll = new ScrollView(this);
         logView = new TextView(this);
@@ -150,7 +177,7 @@ public class MainActivity extends Activity {
         return l;
     }
 
-    private void addBtn(LinearLayout parent, String text, View.OnClickListener cl) {
+    private Button addBtn(LinearLayout parent, String text, View.OnClickListener cl) {
         Button btn = new Button(this);
         btn.setText(text);
         btn.setAllCaps(false);
@@ -159,6 +186,93 @@ public class MainActivity extends Activity {
             try { cl.onClick(v); } catch (Throwable e) { err(text, e); }
         });
         parent.addView(btn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        return btn;
+    }
+
+    /** Arka plan iş parçacığından güvenli log */
+    private void ui(String s) { runOnUiThread(() -> line(s)); }
+
+    // ---------------- 5/6. Sıcaklık okuma ----------------
+
+    private void readTempOnce() {
+        if (busy) { line("Meşgul, bekle..."); return; }
+        UsbDevice t = findTarget();
+        if (t == null || !usb.hasPermission(t)) { line("Sıcaklık oku: cihaz yok ya da USB izni yok."); return; }
+        busy = true;
+        line("── SICAKLIK OKUMA (256x384 modu) ──");
+        new Thread(() -> {
+            ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
+            try {
+                if (s.open()) {
+                    byte[] f = null;
+                    for (int k = 0; k < 3 && f == null; k++) f = s.grabFrame(3000);
+                    if (f != null) {
+                        ThermalSession.Result r = ThermalSession.analyze(f);
+                        ui("Kare alındı: " + f.length + " byte");
+                        for (String h : r.halves.split("\n")) ui("  " + h);
+                        ui(String.format(Locale.US, "  MERKEZ: %.1f °C (ham=%d)   min=%.1f (%d,%d)  maks=%.1f (%d,%d)  ort=%.1f",
+                                r.centerC, r.centerRaw, r.minC, r.minX, r.minY, r.maxC, r.maxX, r.maxY, r.avgC));
+                        show(r);
+                    }
+                }
+            } catch (Throwable e) {
+                ui("!! HATA (sıcaklık): " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            } finally {
+                s.close();
+                busy = false;
+                ui("Okuma bitti. Kameranın gösterdiği yer için Fluke/başka termometreyle karşılaştır.");
+            }
+        }).start();
+    }
+
+    private void toggleLive() {
+        if (live) { live = false; return; }
+        if (busy) { line("Meşgul, bekle..."); return; }
+        UsbDevice t = findTarget();
+        if (t == null || !usb.hasPermission(t)) { line("Canlı: cihaz yok ya da USB izni yok."); return; }
+        live = true;
+        busy = true;
+        liveBtn.setText("6. Canlı ■");
+        line("── CANLI MOD başladı (durdurmak için tekrar bas) ──");
+        new Thread(() -> {
+            ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
+            int ok = 0, fail = 0;
+            try {
+                if (s.open()) {
+                    while (live) {
+                        byte[] f = s.grabFrame(2000);
+                        if (f == null) { if (++fail >= 5) { ui("!! 5 kare üst üste alınamadı, durduruldu."); break; } continue; }
+                        ok++;
+                        show(ThermalSession.analyze(f));
+                    }
+                }
+            } catch (Throwable e) {
+                ui("!! HATA (canlı): " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            } finally {
+                s.close();
+                live = false;
+                busy = false;
+                int fOk = ok, fFail = fail;
+                runOnUiThread(() -> {
+                    liveBtn.setText("6. Canlı ▶");
+                    line("Canlı mod bitti. Başarılı kare=" + fOk + "  başarısız=" + fFail);
+                });
+            }
+        }).start();
+    }
+
+    private void show(ThermalSession.Result r) {
+        runOnUiThread(() -> {
+            if (Double.isNaN(r.centerC)) {
+                tempView.setText("Sıcaklık verisi yok");
+            } else {
+                tempView.setText(String.format(Locale.US, "Merkez: %.1f °C", r.centerC));
+                statView.setText(String.format(Locale.US, "min %.1f   maks %.1f   ort %.1f   (ham %d)",
+                        r.minC, r.maxC, r.avgC, r.centerRaw));
+            }
+            if (r.thermal != null) imgThermal.setImageBitmap(r.thermal);
+            if (r.image != null) imgImage.setImageBitmap(r.image);
+        });
     }
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }

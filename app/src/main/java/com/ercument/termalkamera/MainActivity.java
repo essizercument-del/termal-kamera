@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
     private ImageView imgThermal, imgImage;
     private Button liveBtn;
     private volatile boolean live, busy;
+    private volatile int workingAlt = -1;
     private final SimpleDateFormat tf = new SimpleDateFormat("HH:mm:ss", Locale.US);
 
     private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
@@ -139,6 +140,7 @@ public class MainActivity extends Activity {
         addBtn(r2, "Kopyala", v -> copy());
         addBtn(r3, "5. Sıcaklık oku", v -> readTempOnce());
         liveBtn = addBtn(r3, "6. Canlı ▶", v -> toggleLive());
+        addBtn(r3, "7. Akış testi", v -> streamTest());
         root.addView(r1);
         root.addView(r2);
         root.addView(r3);
@@ -202,6 +204,7 @@ public class MainActivity extends Activity {
         line("── SICAKLIK OKUMA (256x384 modu) ──");
         new Thread(() -> {
             ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
+            s.forceAlt = workingAlt;
             try {
                 if (s.open()) {
                     byte[] f = null;
@@ -225,6 +228,42 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Tüm hız modlarını (alt 7→1) iki kare boyutunda dener; hangisinde veri geldiğini raporlar. */
+    private void streamTest() {
+        if (busy) { line("Meşgul, bekle..."); return; }
+        UsbDevice t = findTarget();
+        if (t == null || !usb.hasPermission(t)) { line("Akış testi: cihaz yok ya da USB izni yok."); return; }
+        busy = true;
+        line("── AKIŞ TESTİ (yaklaşık 20 sn sürer) ──");
+        new Thread(() -> {
+            int[] frames = {2, 1};
+            int found = -1, foundFrame = -1;
+            for (int fi : frames) {
+                ui("Kare #" + fi + (fi == 2 ? " (256x384)" : " (256x192)") + ":");
+                ThermalSession s = new ThermalSession(usb, t, fi, this::ui);
+                try {
+                    if (s.open(false)) {
+                        int a = s.sweep(1200);
+                        if (a > 0 && found < 0) { found = a; foundFrame = fi; }
+                    }
+                } catch (Throwable e) {
+                    ui("!! HATA (akış testi): " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                } finally {
+                    s.close();
+                }
+                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            }
+            if (found > 0) {
+                workingAlt = found;
+                ui("✓ Veri gelen ilk mod: kare #" + foundFrame + " alt=" + found + ". 5/6 numaralı butonlar artık bu alt'ı kullanacak.");
+            } else {
+                ui("✗ Hiçbir modda veri gelmedi. Bu sonucu olduğu gibi gönder.");
+            }
+            busy = false;
+            ui("AKIŞ TESTİ BİTTİ. \"Paylaş\" ile gönder.");
+        }).start();
+    }
+
     private void toggleLive() {
         if (live) { live = false; return; }
         if (busy) { line("Meşgul, bekle..."); return; }
@@ -236,6 +275,7 @@ public class MainActivity extends Activity {
         line("── CANLI MOD başladı (durdurmak için tekrar bas) ──");
         new Thread(() -> {
             ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
+            s.forceAlt = workingAlt;
             int ok = 0, fail = 0;
             try {
                 if (s.open()) {

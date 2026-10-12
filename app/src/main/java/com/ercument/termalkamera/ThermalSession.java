@@ -43,7 +43,10 @@ final class ThermalSession {
 
     int frameSize() { return frameSize; }
 
-    boolean open() {
+    boolean open() { return open(true); }
+
+    /** stream=false: sadece claim + PROBE/COMMIT (akış testi için) */
+    boolean open(boolean stream) {
         conn = usb.openDevice(dev);
         if (conn == null) { log.l("!! openDevice() boş döndü"); return false; }
 
@@ -58,6 +61,40 @@ final class ThermalSession {
 
         xuDump();
 
+        if (!probeCommit()) return false;
+        if (!stream) return true;
+        int ifn = vs0.getId();
+        int need = lastPayload;
+
+        // Paket boyu yetecek en küçük alt ayarı seç
+        UsbInterface best = null, largest = null;
+        int bestSz = Integer.MAX_VALUE, largestSz = 0;
+        for (int i = 0; i < dev.getInterfaceCount(); i++) {
+            UsbInterface f = dev.getInterface(i);
+            if (f.getId() != ifn || f.getAlternateSetting() == 0 || f.getEndpointCount() == 0) continue;
+            UsbEndpoint e = f.getEndpoint(0);
+            int mp = e.getMaxPacketSize();
+            int sz = (mp & 0x7FF) * (((mp >> 11) & 3) + 1);
+            if (sz > largestSz) { largestSz = sz; largest = f; }
+            if (sz >= need && sz < bestSz) { bestSz = sz; best = f; }
+            if (f.getAlternateSetting() == forceAlt) { best = f; bestSz = -1; break; }
+        }
+        vsAlt = best != null ? best : largest;
+        if (vsAlt == null) { log.l("!! ISO alt ayar bulunamadı"); return false; }
+        UsbEndpoint e = vsAlt.getEndpoint(0);
+        int mp = e.getMaxPacketSize();
+        pkt = (mp & 0x7FF) * (((mp >> 11) & 3) + 1);
+        ep = e.getAddress();
+        boolean ok = conn.setInterface(vsAlt);
+        log.l(String.format(Locale.US, "Akış: alt=%d uç=0x%02x paket=%d  setInterface=%b", vsAlt.getAlternateSetting(), ep, pkt, ok));
+        return ok;
+    }
+
+    int forceAlt = -1;
+    private int lastPayload;
+
+    /** UVC PROBE + COMMIT: format #1, istenen kare, 25 fps */
+    boolean probeCommit() {
         int ifn = vs0.getId();
         byte[] p = new byte[26];
         put16(p, 0, 1);              // bmHint: kare aralığı sabit
@@ -73,32 +110,56 @@ final class ThermalSession {
         if ((g[3] & 0xFF) != frameIndex) log.l("! Kamera istenen kareyi kabul etmedi (istenen #" + frameIndex + ")");
         int r3 = conn.controlTransfer(0x21, 0x01, 0x0200, ifn, g, g.length, 1000);
         log.l("COMMIT=" + r3);
-
         frameSize = (int) u32(g, 18);
-        int need = (int) u32(g, 22);
         if (frameSize <= 0) frameSize = W * (frameIndex == 2 ? 2 * H : H) * 2;
+        lastPayload = (int) u32(g, 22);
+        return true;
+    }
 
-        // Paket boyu yetecek en küçük alt ayarı seç
-        UsbInterface best = null, largest = null;
-        int bestSz = Integer.MAX_VALUE, largestSz = 0;
-        for (int i = 0; i < dev.getInterfaceCount(); i++) {
-            UsbInterface f = dev.getInterface(i);
-            if (f.getId() != ifn || f.getAlternateSetting() == 0 || f.getEndpointCount() == 0) continue;
+    /** Tüm ISO alt ayarlarını sırayla dener, her birinde gelen veriyi raporlar. En iyi alt'ı döner (-1 yoksa). */
+    int sweep(int ms) {
+        int ifn = vs0.getId();
+        int bestAlt = -1, bestBytes = 0;
+        for (int a = 7; a >= 1; a--) {
+            UsbInterface f = null;
+            for (int i = 0; i < dev.getInterfaceCount(); i++) {
+                UsbInterface x = dev.getInterface(i);
+                if (x.getId() == ifn && x.getAlternateSetting() == a && x.getEndpointCount() > 0) f = x;
+            }
+            if (f == null) continue;
+            try { conn.setInterface(vs0); Thread.sleep(100); } catch (Throwable ignored) {}
+            probeCommitQuiet();
             UsbEndpoint e = f.getEndpoint(0);
             int mp = e.getMaxPacketSize();
             int sz = (mp & 0x7FF) * (((mp >> 11) & 3) + 1);
-            if (sz > largestSz) { largestSz = sz; largest = f; }
-            if (sz >= need && sz < bestSz) { bestSz = sz; best = f; }
+            boolean ok = conn.setInterface(f);
+            byte[] buf = new byte[frameSize];
+            for (int k = 0; k < stats.length; k++) stats[k] = 0;
+            int n = grab(conn.getFileDescriptor(), e.getAddress(), sz, buf, ms, stats);
+            log.l(String.format(Locale.US, "  alt=%d paket=%d set=%b → %s  %s",
+                    a, sz, ok, n > 0 ? "TAM KARE ✓" : "kare yok", statsString()));
+            if (stats[11] > bestBytes) { bestBytes = stats[11]; bestAlt = a; }
         }
-        vsAlt = best != null ? best : largest;
-        if (vsAlt == null) { log.l("!! ISO alt ayar bulunamadı"); return false; }
-        UsbEndpoint e = vsAlt.getEndpoint(0);
-        int mp = e.getMaxPacketSize();
-        pkt = (mp & 0x7FF) * (((mp >> 11) & 3) + 1);
-        ep = e.getAddress();
-        boolean ok = conn.setInterface(vsAlt);
-        log.l(String.format(Locale.US, "Akış: alt=%d uç=0x%02x paket=%d  setInterface=%b", vsAlt.getAlternateSetting(), ep, pkt, ok));
-        return ok;
+        try { conn.setInterface(vs0); } catch (Throwable ignored) {}
+        return bestAlt;
+    }
+
+    private void probeCommitQuiet() {
+        int ifn = vs0.getId();
+        byte[] p = new byte[26];
+        put16(p, 0, 1); p[2] = 1; p[3] = (byte) frameIndex; put32(p, 4, 400000);
+        conn.controlTransfer(0x21, 0x01, 0x0100, ifn, p, p.length, 1000);
+        byte[] g = new byte[26];
+        if (conn.controlTransfer(0xA1, 0x81, 0x0100, ifn, g, g.length, 1000) == 26) {
+            conn.controlTransfer(0x21, 0x01, 0x0200, ifn, g, g.length, 1000);
+        }
+    }
+
+    String statsString() {
+        return String.format(Locale.US,
+                "paket=%d veri=%d boş=%d sadeceBaşlık=%d hatalıPaket=%d (kod %d/%d) urbHata=%d(kod %d) kötüBaşlık=%d EOF=%d yanlışBoy=%d(son %d) gelen=%dKB enUzun=%d",
+                stats[0], stats[1], stats[9], stats[10], stats[8], stats[12], stats[13], stats[5], stats[14],
+                stats[6], stats[7], stats[3], stats[4], stats[11], stats[15]);
     }
 
     /** Üreticiye özel birimin (XU) kontrollerini sadece OKUR (yazma yok). */
@@ -121,14 +182,13 @@ final class ThermalSession {
         }
     }
 
-    final int[] stats = new int[8];
+    final int[] stats = new int[16];
 
     byte[] grabFrame(int timeoutMs) {
         byte[] f = new byte[frameSize];
         int n = grab(conn.getFileDescriptor(), ep, pkt, f, timeoutMs, stats);
         if (n > 0) return f;
-        log.l(String.format(Locale.US, "!! Kare alınamadı (sonuç=%d) paket=%d veri=%d hataBayrak=%d yanlışBoy=%d sonYanlış=%d urbHata=%d kötüBaşlık=%d EOF=%d",
-                n, stats[0], stats[1], stats[2], stats[3], stats[4], stats[5], stats[6], stats[7]));
+        log.l("!! Kare alınamadı (sonuç=" + n + ") " + statsString());
         return null;
     }
 

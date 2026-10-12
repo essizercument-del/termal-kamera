@@ -17,7 +17,18 @@
 #define NPKT 32
 
 /* stats dizisi indeksleri */
-enum { ST_PKT = 0, ST_DATA, ST_ERRFLAG, ST_BADSIZE, ST_LASTBAD, ST_URBERR, ST_BADHDR, ST_FRAMES, ST_N };
+enum {
+    ST_PKT = 0, ST_DATA, ST_ERRFLAG, ST_BADSIZE, ST_LASTBAD, ST_URBERR, ST_BADHDR, ST_FRAMES,
+    ST_PKTSTATUS,   /* paket durum kodu != 0 olan paket sayısı */
+    ST_ZERO,        /* hatasız ama 0 byte gelen paket */
+    ST_HDRONLY,     /* sadece UVC başlığı, veri yok */
+    ST_KBYTES,      /* gelen toplam yük (KB) */
+    ST_STAT1,       /* ilk görülen paket durum kodu */
+    ST_STAT2,       /* ikinci farklı durum kodu */
+    ST_URBSTAT,     /* ilk URB durum kodu */
+    ST_MAXLEN,      /* en uzun paket */
+    ST_N
+};
 
 static long long now_ms(void) {
     struct timespec t;
@@ -93,6 +104,7 @@ Java_com_ercument_termalkamera_ThermalSession_grab(JNIEnv *env, jclass cls, jint
 
     int fid = -1, started = 0, done = 0;
     size_t len = 0;
+    long long totalBytes = 0;
     long long t0 = now_ms();
 
     while (!done) {
@@ -112,16 +124,27 @@ Java_com_ercument_termalkamera_ThermalSession_grab(JNIEnv *env, jclass cls, jint
         if (!r) continue;
         int idx = (int) (intptr_t) r->usercontext;
         if (idx >= 0 && idx < NURB) pending[idx] = 0;
-        if (r->status != 0) stats[ST_URBERR]++;
+        if (r->status != 0) {
+            stats[ST_URBERR]++;
+            if (stats[ST_URBSTAT] == 0) stats[ST_URBSTAT] = r->status;
+        }
 
         uint8_t *base = (uint8_t *) r->buffer;
         for (int k = 0; k < r->number_of_packets && !done; k++) {
             stats[ST_PKT]++;
             int alen = (int) r->iso_frame_desc[k].actual_length;
-            if (r->iso_frame_desc[k].status != 0 || alen <= 0) continue;
+            int st = (int) r->iso_frame_desc[k].status;
+            if (st != 0) {
+                stats[ST_PKTSTATUS]++;
+                if (stats[ST_STAT1] == 0) stats[ST_STAT1] = st;
+                else if (st != stats[ST_STAT1] && stats[ST_STAT2] == 0) stats[ST_STAT2] = st;
+            }
+            if (alen > stats[ST_MAXLEN]) stats[ST_MAXLEN] = alen;
+            if (alen <= 0) { if (st == 0) stats[ST_ZERO]++; continue; }
             uint8_t *p = base + (size_t) k * pktSize;
             int hl = p[0];
             if (hl < 2 || hl > alen) { stats[ST_BADHDR]++; continue; }
+            if (alen == hl) stats[ST_HDRONLY]++;
             int flags = p[1];
             int f = flags & 0x01;
             if (flags & 0x40) stats[ST_ERRFLAG]++;
@@ -137,7 +160,7 @@ Java_com_ercument_termalkamera_ThermalSession_grab(JNIEnv *env, jclass cls, jint
             fid = f;
 
             int plen = alen - hl;
-            if (plen > 0) stats[ST_DATA]++;
+            if (plen > 0) { stats[ST_DATA]++; totalBytes += plen; }
             if (started && plen > 0) {
                 if (len + plen <= (size_t) expected + 65536) {
                     memcpy(frame + len, p + hl, (size_t) plen);
@@ -165,6 +188,7 @@ Java_com_ercument_termalkamera_ThermalSession_grab(JNIEnv *env, jclass cls, jint
         if (idx >= 0 && idx < NURB) pending[idx] = 1;
     }
 
+    stats[ST_KBYTES] = (jint) (totalBytes / 1024);
     if (result > 0) (*env)->SetByteArrayRegion(env, out, 0, expected, (const jbyte *) frame);
 
 done:

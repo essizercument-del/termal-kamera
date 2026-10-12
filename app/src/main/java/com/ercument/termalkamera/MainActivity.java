@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
     static final String URL = "https://essizercument-del.github.io/Termal/sicaklikv9.html";
     static final int REQ_CAM = 21, REQ_FILE = 22, REQ_PERM_WEB = 23;
 
+    static volatile boolean alive;
     private WebView web;
     private ValueCallback<Uri[]> fileCb;
     private PermissionRequest pendingWebPerm;
@@ -66,6 +67,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        alive = true;
         web = new WebView(this);
         setContentView(web);
 
@@ -265,6 +267,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        alive = false;
         if (web != null) web.destroy();
         super.onDestroy();
     }

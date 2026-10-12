@@ -13,9 +13,11 @@ public class UsbAttachActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        if (!CameraActivity.active) {
+        // Kamera ekranı açıksa (izin penceresi yüzünden arka planda olsa bile) dokunma: MainActivity
+        // singleTask olduğu için onu başlatmak üstündeki kamera ekranını kapatırdı. Değilse uygulamayı öne getir.
+        if (!CameraActivity.exists) {
             Intent i = new Intent(this, MainActivity.class);
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
         }
         finish();

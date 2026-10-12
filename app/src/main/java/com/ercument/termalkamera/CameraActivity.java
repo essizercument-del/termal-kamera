@@ -33,6 +33,11 @@ public class CameraActivity extends Activity {
     static final String ACTION_USB_PERMISSION = "com.ercument.termalkamera.CAM_USB_PERMISSION";
     static final int REQ_CAMERA = 31;
     static volatile boolean active;
+    /** Ekran hayatta mı (onCreate→onDestroy). İzin/takma penceresi açılınca onPause olur ama ekran kapanmaz. */
+    static volatile boolean exists;
+    private static final Object USB_LOCK = new Object();
+    private final StringBuilder logBuf = new StringBuilder();
+    private boolean rotated;
 
     private UsbManager usb;
     private ImageView img;
@@ -46,7 +51,9 @@ public class CameraActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
+        exists = true;
         usb = (UsbManager) getSystemService(Context.USB_SERVICE);
+        try { rotated = getSharedPreferences("kamera", 0).getBoolean("rotated", false); } catch (Throwable ignored) {}
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildUi(getIntent().getStringExtra(EXTRA_TAG));
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -113,11 +120,63 @@ public class CameraActivity extends Activity {
         Button tani = new Button(this);
         tani.setText("Tanı");
         tani.setOnClickListener(v -> startActivity(new Intent(this, TaniActivity.class)));
-        row.addView(cancel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 3f));
+        Button rot = new Button(this);
+        rot.setText("Döndür");
+        rot.setOnClickListener(v -> {
+            rotated = !rotated;
+            img.setRotation(rotated ? 180f : 0f);
+            try { getSharedPreferences("kamera", 0).edit().putBoolean("rotated", rotated).apply(); } catch (Throwable ignored) {}
+        });
+        Button logBtn = new Button(this);
+        logBtn.setText("Log");
+        logBtn.setOnClickListener(v -> showLog());
+        row.addView(cancel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f));
+        row.addView(rot, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.4f));
+        row.addView(logBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(tani, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(row);
 
+        img.setRotation(rotated ? 180f : 0f);
         setContentView(root);
+    }
+
+    // ---------------- Log ----------------
+
+    private final java.text.SimpleDateFormat tf = new java.text.SimpleDateFormat("HH:mm:ss", Locale.US);
+
+    void log(String s) {
+        synchronized (logBuf) {
+            logBuf.append(tf.format(new java.util.Date())).append("  ").append(s).append('\n');
+            if (logBuf.length() > 20000) logBuf.delete(0, logBuf.length() - 15000);
+        }
+    }
+
+    private void showLog() {
+        String t;
+        synchronized (logBuf) { t = logBuf.toString(); }
+        String ver = "?";
+        try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Throwable ignored) {}
+        final String full = "Termal Takip " + ver + "  " + Build.MANUFACTURER + " " + Build.MODEL + " Android " + Build.VERSION.RELEASE + "\n" + t;
+        TextView tv = new TextView(this);
+        tv.setText(full);
+        tv.setTextSize(11);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextIsSelectable(true);
+        int p = dp(12);
+        tv.setPadding(p, p, p, p);
+        android.widget.ScrollView sv = new android.widget.ScrollView(this);
+        sv.addView(tv);
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Kamera logu")
+                .setView(sv)
+                .setPositiveButton("Paylaş", (d, w) -> {
+                    Intent i = new Intent(Intent.ACTION_SEND);
+                    i.setType("text/plain");
+                    i.putExtra(Intent.EXTRA_TEXT, full);
+                    startActivity(Intent.createChooser(i, "Logu paylaş"));
+                })
+                .setNegativeButton("Kapat", null)
+                .show();
     }
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
@@ -126,6 +185,7 @@ public class CameraActivity extends Activity {
         ThermalSession.Result r = last;
         if (r == null || Double.isNaN(r.centerC)) return;
         double t = Math.round(r.centerC * 10.0) / 10.0;
+        log("ÖLÇÜM ALINDI: " + t + " °C");
         Intent i = new Intent();
         i.putExtra(EXTRA_TEMP, t);
         setResult(RESULT_OK, i);
@@ -137,6 +197,7 @@ public class CameraActivity extends Activity {
         super.onResume();
         active = true;
         running = true;
+        log("ekran açık (onResume)");
         worker = new Thread(this::loop, "termal-akis");
         worker.start();
     }
@@ -145,6 +206,7 @@ public class CameraActivity extends Activity {
     protected void onPause() {
         running = false;
         active = false;
+        log("ekran arka planda (onPause)");
         if (worker != null) {
             try { worker.join(3000); } catch (InterruptedException ignored) {}
             worker = null;
@@ -152,10 +214,21 @@ public class CameraActivity extends Activity {
         super.onPause();
     }
 
-    private void status(String s) { runOnUiThread(() -> statusView.setText(s)); }
+    private String lastStatus = "";
+
+    private void status(String s) {
+        if (!s.equals(lastStatus)) { lastStatus = s; if (!s.isEmpty()) log("durum: " + s); }
+        runOnUiThread(() -> statusView.setText(s));
+    }
 
     /** Kamera takılı/izinli olana kadar bekler, akışı açar, kopunca yeniden dener. */
     private void loop() {
+        synchronized (USB_LOCK) {      // eski akış tam kapanmadan yenisi USB'ye dokunmasın
+            try { loopInner(); } catch (Throwable t) { log("!! döngü hatası: " + t); }
+        }
+    }
+
+    private void loopInner() {
         while (running) {
             if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 status("Kamera izni gerekiyor");
@@ -175,7 +248,8 @@ public class CameraActivity extends Activity {
                 continue;
             }
             status("Kamera açılıyor...");
-            ThermalSession s = new ThermalSession(usb, d, 2, msg -> { });
+            log("kamera bulundu, izin var: " + String.format(Locale.US, "VID=%04x PID=%04x", d.getVendorId(), d.getProductId()));
+            ThermalSession s = new ThermalSession(usb, d, 2, this::log);
             int fail = 0;
             try {
                 if (!s.open()) {
@@ -184,6 +258,8 @@ public class CameraActivity extends Activity {
                     continue;
                 }
                 status("");
+                int frames = 0;
+                long t0 = SystemClock.elapsedRealtime();
                 while (running) {
                     s.heartbeatIfDue();
                     byte[] f = s.grabFrame(2000);
@@ -193,12 +269,16 @@ public class CameraActivity extends Activity {
                         continue;
                     }
                     fail = 0;
+                    if (++frames == 1 || frames % 100 == 0) {
+                        log(String.format(Locale.US, "kare #%d (%.1f sn)", frames, (SystemClock.elapsedRealtime() - t0) / 1000.0));
+                    }
                     ThermalSession.Result r = ThermalSession.analyze(f);
                     if (Double.isNaN(r.centerC)) continue;
                     last = r;
                     runOnUiThread(() -> show(r));
                 }
             } catch (Throwable e) {
+                log("!! hata: " + e);
                 status("Hata: " + e.getMessage());
                 SystemClock.sleep(1000);
             } finally {
@@ -219,6 +299,7 @@ public class CameraActivity extends Activity {
         long now = SystemClock.elapsedRealtime();
         if (now - lastPermAsk < 8000) return;
         lastPermAsk = now;
+        log("USB izni isteniyor");
         Intent i = new Intent(ACTION_USB_PERMISSION);
         i.setPackage(getPackageName());
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
@@ -237,5 +318,12 @@ public class CameraActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
+        log("kamera izni: " + (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED ? "verildi" : "reddedildi"));
+    }
+
+    @Override
+    protected void onDestroy() {
+        exists = false;
+        super.onDestroy();
     }
 }

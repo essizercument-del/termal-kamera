@@ -280,6 +280,7 @@ public class MainActivity extends Activity {
             try {
                 if (s.open()) {
                     while (live) {
+                        s.heartbeatIfDue();
                         byte[] f = s.grabFrame(2000);
                         if (f == null) { if (++fail >= 5) { ui("!! 5 kare üst üste alınamadı, durduruldu."); break; } continue; }
                         ok++;

@@ -59,7 +59,7 @@ final class ThermalSession {
         if (vc == null || vs0 == null) { log.l("!! VideoControl/VideoStreaming arayüzü bulunamadı"); return false; }
         log.l("claim VC: " + conn.claimInterface(vc, true) + "   claim VS: " + conn.claimInterface(vs0, true));
 
-        xuDump();
+        handshake();
 
         if (!probeCommit()) return false;
         if (!stream) return true;
@@ -88,6 +88,37 @@ final class ThermalSession {
         boolean ok = conn.setInterface(vsAlt);
         log.l(String.format(Locale.US, "Akış: alt=%d uç=0x%02x paket=%d  setInterface=%b", vsAlt.getAlternateSetting(), ep, pkt, ok));
         return ok;
+    }
+
+    /**
+     * Fluke/InfiRay el sıkışma (libircmd.so → hand_shake_preview):
+     *   OUT vendor 0x41, istek 0x45, değer 0x0078, indeks 0x1d00, veri 05 53 00 00 00 00 00 00
+     *   ardından durum: IN 0xC1, istek 0x44, değer 0x0078, indeks 0x0200, 1 bayt; bit0=meşgul
+     * Kamera bunu almadan görüntü göndermiyor. Fluke uygulaması 20 sn'de bir tekrarlıyor.
+     */
+    boolean handshake() {
+        byte[] cmd = {0x05, 0x53, 0, 0, 0, 0, 0, 0};
+        int w = conn.controlTransfer(0x41, 0x45, 0x0078, 0x1d00, cmd, cmd.length, 1000);
+        byte[] st = new byte[1];
+        int status = -1, tries = 0, r = -1;
+        for (; tries < 1000; tries++) {
+            r = conn.controlTransfer(0xC1, 0x44, 0x0078, 0x0200, st, 1, 1000);
+            if (r < 1) break;
+            status = st[0] & 0xFF;
+            if ((status & 0x01) == 0) break;
+        }
+        boolean ok = w == 8 && r == 1 && (status & 0x01) == 0 && !((status & 0x02) != 0 && status > 3);
+        log.l(String.format(Locale.US, "EL SIKIŞMA: yazma=%d  durum okuma=%d  durum=0x%02x  deneme=%d  → %s",
+                w, r, status & 0xFF, tries + 1, ok ? "BAŞARILI ✓" : "BAŞARISIZ ✗"));
+        lastHandshake = android.os.SystemClock.elapsedRealtime();
+        return ok;
+    }
+
+    private long lastHandshake;
+
+    /** Canlı modda 15 sn'de bir el sıkışmayı tazele (Fluke 20 sn kullanıyor) */
+    void heartbeatIfDue() {
+        if (android.os.SystemClock.elapsedRealtime() - lastHandshake > 15000) handshake();
     }
 
     int forceAlt = -1;

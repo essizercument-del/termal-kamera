@@ -215,7 +215,12 @@ final class UvcParser {
                         for (int k = 0; k < n && ctrlSizeIdx + 1 + k < i + len; k++) {
                             bm.append(String.format(Locale.US, "%02x", u8(d, ctrlSizeIdx + 1 + k)));
                         }
-                        ctrls = " kontrol bitmap=" + bm;
+                        StringBuilder sel = new StringBuilder();
+                        for (int k = 0; k < n * 8; k++) {
+                            int byteIdx = ctrlSizeIdx + 1 + k / 8;
+                            if (byteIdx < i + len && ((u8(d, byteIdx) >> (k % 8)) & 1) != 0) sel.append(k + 1).append(' ');
+                        }
+                        ctrls = " kontrol bitmap=" + bm + " → aktif seçiciler: " + sel.toString().trim();
                     }
                     sb.append(String.format(Locale.US, "  ÜRETİCİYE ÖZEL BİRİM (XU) id=%d  kontrol sayısı=%d%s%n          GUID %s%n",
                             u8(d, i + 3), u8(d, i + 20), ctrls, guid(d, i + 4)));

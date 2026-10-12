@@ -165,21 +165,24 @@ final class ThermalSession {
     /** Üreticiye özel birimin (XU) kontrollerini sadece OKUR (yazma yok). */
     private void xuDump() {
         int idx = (XU_UNIT << 8) | vc.getId();
-        for (int sel = 1; sel <= 3; sel++) {
+        StringBuilder none = new StringBuilder();
+        for (int sel = 1; sel <= 16; sel++) {
             byte[] info = new byte[1];
-            int ri = conn.controlTransfer(0xA1, 0x86, sel << 8, idx, info, 1, 500);
+            int ri = conn.controlTransfer(0xA1, 0x86, sel << 8, idx, info, 1, 300);
             byte[] ln = new byte[2];
-            int rl = conn.controlTransfer(0xA1, 0x85, sel << 8, idx, ln, 2, 500);
+            int rl = conn.controlTransfer(0xA1, 0x85, sel << 8, idx, ln, 2, 300);
             int len = rl == 2 ? ((ln[0] & 0xFF) | (ln[1] & 0xFF) << 8) : 0;
+            if (ri != 1 && rl != 2) { none.append(sel).append(' '); continue; }
             String cur = "-";
             if (len > 0 && len <= 512) {
                 byte[] c = new byte[len];
                 int rc = conn.controlTransfer(0xA1, 0x81, sel << 8, idx, c, len, 500);
-                cur = rc > 0 ? hex(c, Math.min(rc, 48)) : ("hata " + rc);
+                cur = rc > 0 ? hex(c, Math.min(rc, 64)) : ("hata " + rc);
             }
             log.l(String.format(Locale.US, "XU sel=%d info=%s uzunluk=%d değer=%s",
                     sel, ri == 1 ? String.format(Locale.US, "0x%02x", info[0]) : "yok", len, cur));
         }
+        log.l("XU cevap vermeyen seçiciler: " + (none.length() == 0 ? "yok" : none.toString().trim()));
     }
 
     final int[] stats = new int[16];

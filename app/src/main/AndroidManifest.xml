@@ -1,24 +1,53 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
-        android:label="Termal Kamera Tanı"
-        android:theme="@android:style/Theme.Material.Light.DarkActionBar"
+        android:label="Termal Takip"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false">
 
+        <!-- Ana ekran: Termal Takip -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop">
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|uiMode"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Kamera takılınca "Bu uygulamayla aç" sorusu: onaylanırsa USB izni otomatik gelir -->
+        </activity>
+
+        <!-- Canlı termal görüntü + ölçüm -->
+        <activity
+            android:name=".CameraActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
+        <!-- Tanı ekranı (kamera ekranından "Tanı") -->
+        <activity
+            android:name=".TaniActivity"
+            android:exported="false"
+            android:label="Termal Kamera Tanı"
+            android:theme="@android:style/Theme.Material.Light.DarkActionBar" />
+
+        <!-- Kamera takılınca: onay → USB izni otomatik -->
+        <activity
+            android:name=".UsbAttachActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>

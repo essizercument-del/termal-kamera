@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Basit termometre simgesi -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#0A0F1A" android:pathData="M8,0h32a8,8 0,0 1,8 8v32a8,8 0,0 1,-8 8h-32a8,8 0,0 1,-8 -8v-32a8,8 0,0 1,8 -8z"/>
+    <path android:fillColor="#00E5FF" android:pathData="M21,9a3,3 0,0 1,6 0v18.6a7,7 0,1 1,-6 0z"/>
+    <path android:fillColor="#0A0F1A" android:pathData="M23,10a1,1 0,0 1,2 0v18.5a5,5 0,1 1,-2 0z"/>
+    <path android:fillColor="#FF5252" android:pathData="M24,29a4,4 0,1 1,-0.01 0zM23.2,16h1.6v14h-1.6z"/>
+</vector>

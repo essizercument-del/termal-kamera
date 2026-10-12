@@ -2,601 +2,270 @@ package com.ercument.termalkamera;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.PendingIntent;
-import android.content.BroadcastReceiver;
-import android.content.ClipData;
-import android.content.ClipboardManager;
+import android.app.AlertDialog;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.PackageManager;
-import android.graphics.Typeface;
-import android.hardware.camera2.CameraCharacteristics;
-import android.hardware.camera2.CameraManager;
-import android.hardware.usb.UsbConstants;
-import android.hardware.usb.UsbDevice;
-import android.hardware.usb.UsbDeviceConnection;
-import android.hardware.usb.UsbEndpoint;
-import android.hardware.usb.UsbInterface;
-import android.hardware.usb.UsbManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.SystemClock;
-import android.view.View;
-import android.widget.Button;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
-import android.widget.ScrollView;
-import android.widget.TextView;
+import android.os.Environment;
+import android.provider.MediaStore;
+import android.util.Base64;
+import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Toast;
 
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.HashMap;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.util.Locale;
 
 /**
- * Termal kamera tanı uygulaması.
- * Amaç: USB izninin neden reddedildiğini ve kameranın hangi görüntü formatlarını
- * gönderdiğini (ham sıcaklık verisi var mı?) ekrana yazmak. Sonuç "Paylaş" ile gönderilir.
+ * Ana ekran: Termal Takip (GitHub Pages) uygulama içi tarayıcıda.
+ * JS köprüsü "TermalKamera": olc(hedefId, tag) → kamera ekranı → window.kameraSonuc(deger, hedefId)
  */
 public class MainActivity extends Activity {
 
-    static final String ACTION_USB_PERMISSION = "com.ercument.termalkamera.USB_PERMISSION";
-    static final int FLUKE_VID = 0x0f7e;
-    static final int REQ_CAMERA = 11;
+    static final String URL = "https://essizercument-del.github.io/Termal/sicaklikv9.html";
+    static final int REQ_CAM = 21, REQ_FILE = 22, REQ_PERM_WEB = 23;
 
-    private UsbManager usb;
-    private TextView logView;
-    private ScrollView scroll;
-    private final StringBuilder log = new StringBuilder();
-    private long usbRequestTime;
-    private boolean receiverRegistered;
-    private TextView tempView, statView;
-    private ImageView imgThermal, imgImage;
-    private Button liveBtn;
-    private volatile boolean live, busy;
-    private volatile int workingAlt = -1;
-    private final SimpleDateFormat tf = new SimpleDateFormat("HH:mm:ss", Locale.US);
+    private WebView web;
+    private ValueCallback<Uri[]> fileCb;
+    private PermissionRequest pendingWebPerm;
+    private String camTarget = "kayitTemp";
+    private boolean triedCache;
+    private long lastBack;
 
-    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context c, Intent i) {
-            try {
-                if (!ACTION_USB_PERMISSION.equals(i.getAction())) return;
-                long dt = SystemClock.elapsedRealtime() - usbRequestTime;
-                UsbDevice d = deviceExtra(i);
-                boolean hasExtra = i.hasExtra(UsbManager.EXTRA_PERMISSION_GRANTED);
-                boolean granted = i.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
-                line("── USB İZİN CEVABI (" + dt + " ms sonra) ──");
-                line("  cevapta izin bilgisi var mı: " + hasExtra + "   değer: " + (granted ? "VERİLDİ" : "REDDEDİLDİ"));
-                line("  cevaptaki cihaz: " + (d == null ? "YOK" : devName(d)));
-                UsbDevice t = d != null ? d : findTarget();
-                if (t == null) return;
-                boolean real = usb.hasPermission(t);
-                line("  gerçek durum usb.hasPermission(): " + (real ? "İZİN VAR" : "İZİN YOK"));
-                if (real && !granted) {
-                    line("  ! Cevap 'red' diyor ama izin aslında VAR → PendingIntent bayrak hatası (önceki kodda büyük ihtimalle bu vardı).");
-                }
-                if (!real && dt < 500) {
-                    line("  ! Pencere gösterilmeden " + dt + " ms içinde reddedildi → sistem kendiliğinden reddetti. Genelde CAMERA izni eksikse olur.");
-                }
-                if (real) {
-                    line("  ✓ USB izni alındı, kamera okunuyor...");
-                    openAndRead();
-                }
-            } catch (Throwable e) {
-                err("izin cevabı", e);
-            }
-        }
-    };
+    /** blob:/data: indirmelerini yakalayıp yerel dosyaya yazdırır (a.click, dispatchEvent ve tıklama) */
+    private static final String DL_JS =
+            "(function(){if(window.__tkDl)return;window.__tkDl=1;" +
+            "function h(a){var u=a.href||'';var n=a.getAttribute('download');if(n===null)return false;" +
+            "if(!(u.indexOf('blob:')===0||u.indexOf('data:')===0))return false;" +
+            "fetch(u).then(function(r){return r.blob();}).then(function(b){var f=new FileReader();" +
+            "f.onload=function(){var s=f.result;TermalKamera.saveFile(n||'dosya',b.type||'application/octet-stream',s.substring(s.indexOf(',')+1));};" +
+            "f.readAsDataURL(b);}).catch(function(e){alert('Indirme hatasi: '+e);});return true;}" +
+            "var oc=HTMLAnchorElement.prototype.click;HTMLAnchorElement.prototype.click=function(){if(h(this))return;return oc.apply(this,arguments);};" +
+            "var od=EventTarget.prototype.dispatchEvent;EventTarget.prototype.dispatchEvent=function(e){" +
+            "if(this instanceof HTMLAnchorElement&&e&&e.type==='click'&&h(this))return false;return od.apply(this,arguments);};" +
+            "document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[download]');" +
+            "if(a&&h(a))e.preventDefault();},true);})();";
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        usb = (UsbManager) getSystemService(Context.USB_SERVICE);
-        buildUi();
-        registerUsbReceiver();
-        header();
-        scan();
-        handleIntent(getIntent(), "açılış");
-    }
+        web = new WebView(this);
+        setContentView(web);
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
-        handleIntent(intent, "yeni olay");
-    }
+        WebSettings s = web.getSettings();
+        s.setJavaScriptEnabled(true);
+        s.setDomStorageEnabled(true);
+        s.setDatabaseEnabled(true);
+        s.setMediaPlaybackRequiresUserGesture(false);
+        s.setAllowFileAccess(false);
+        s.setUserAgentString(s.getUserAgentString() + " TermalKameraApp/1");
+        s.setCacheMode(isOnline() ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
 
-    @Override
-    protected void onDestroy() {
-        live = false;
-        if (receiverRegistered) {
-            try { unregisterReceiver(usbReceiver); } catch (Throwable ignored) {}
-        }
-        super.onDestroy();
-    }
+        web.addJavascriptInterface(new Bridge(), "TermalKamera");
+        web.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                v.evaluateJavascript(DL_JS, null);
+            }
 
-    // ---------------- Arayüz ----------------
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                Uri u = r.getUrl();
+                String host = u.getHost() == null ? "" : u.getHost();
+                if (host.endsWith("github.io") || host.endsWith("firebaseapp.com") || host.endsWith("google.com")) return false;
+                try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Throwable ignored) {}
+                return true;
+            }
 
-    private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(8);
-        root.setPadding(p, p, p, p);
-
-        TextView hint = new TextView(this);
-        hint.setText("Sıra: 1 → 2 → 3 → 4. Bitince \"Paylaş\" ile sonucu gönder.");
-        hint.setTextSize(13);
-        root.addView(hint);
-
-        LinearLayout r1 = row(), r2 = row(), r3 = row();
-        addBtn(r1, "1. Tara", v -> scan());
-        addBtn(r1, "2. Kamera izni", v -> requestCameraPerm());
-        addBtn(r1, "3. USB izni", v -> requestUsbPerm());
-        addBtn(r2, "4. Aç ve oku", v -> openAndRead());
-        addBtn(r2, "Paylaş", v -> share());
-        addBtn(r2, "Kopyala", v -> copy());
-        addBtn(r3, "5. Sıcaklık oku", v -> readTempOnce());
-        liveBtn = addBtn(r3, "6. Canlı ▶", v -> toggleLive());
-        addBtn(r3, "7. Akış testi", v -> streamTest());
-        root.addView(r1);
-        root.addView(r2);
-        root.addView(r3);
-
-        tempView = new TextView(this);
-        tempView.setTextSize(30);
-        tempView.setTypeface(Typeface.DEFAULT_BOLD);
-        tempView.setText("Merkez: — °C");
-        root.addView(tempView);
-        statView = new TextView(this);
-        statView.setTextSize(13);
-        root.addView(statView);
-
-        LinearLayout imgs = row();
-        imgThermal = new ImageView(this);
-        imgThermal.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        imgImage = new ImageView(this);
-        imgImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        imgs.addView(imgThermal, new LinearLayout.LayoutParams(0, dp(140), 1f));
-        imgs.addView(imgImage, new LinearLayout.LayoutParams(0, dp(140), 1f));
-        root.addView(imgs);
-
-        scroll = new ScrollView(this);
-        logView = new TextView(this);
-        logView.setTypeface(Typeface.MONOSPACE);
-        logView.setTextSize(11);
-        logView.setTextIsSelectable(true);
-        scroll.addView(logView);
-        root.addView(scroll, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
-        setContentView(root);
-    }
-
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        return l;
-    }
-
-    private Button addBtn(LinearLayout parent, String text, View.OnClickListener cl) {
-        Button btn = new Button(this);
-        btn.setText(text);
-        btn.setAllCaps(false);
-        btn.setTextSize(13);
-        btn.setOnClickListener(v -> {
-            try { cl.onClick(v); } catch (Throwable e) { err(text, e); }
+            @Override
+            public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                if (r.isForMainFrame() && !triedCache) {
+                    // İnternet yoksa en son açılan sürümü önbellekten aç
+                    triedCache = true;
+                    v.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
+                    v.loadUrl(URL);
+                }
+            }
         });
-        parent.addView(btn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        return btn;
-    }
-
-    /** Arka plan iş parçacığından güvenli log */
-    private void ui(String s) { runOnUiThread(() -> line(s)); }
-
-    // ---------------- 5/6. Sıcaklık okuma ----------------
-
-    private void readTempOnce() {
-        if (busy) { line("Meşgul, bekle..."); return; }
-        UsbDevice t = findTarget();
-        if (t == null || !usb.hasPermission(t)) { line("Sıcaklık oku: cihaz yok ya da USB izni yok."); return; }
-        busy = true;
-        line("── SICAKLIK OKUMA (256x384 modu) ──");
-        new Thread(() -> {
-            ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
-            s.forceAlt = workingAlt;
-            try {
-                if (s.open()) {
-                    byte[] f = null;
-                    for (int k = 0; k < 3 && f == null; k++) f = s.grabFrame(3000);
-                    if (f != null) {
-                        ThermalSession.Result r = ThermalSession.analyze(f);
-                        ui("Kare alındı: " + f.length + " byte");
-                        for (String h : r.halves.split("\n")) ui("  " + h);
-                        ui(String.format(Locale.US, "  MERKEZ: %.1f °C (ham=%d)   min=%.1f (%d,%d)  maks=%.1f (%d,%d)  ort=%.1f",
-                                r.centerC, r.centerRaw, r.minC, r.minX, r.minY, r.maxC, r.maxX, r.maxY, r.avgC));
-                        show(r);
-                    }
-                }
-            } catch (Throwable e) {
-                ui("!! HATA (sıcaklık): " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            } finally {
-                s.close();
-                busy = false;
-                ui("Okuma bitti. Kameranın gösterdiği yer için Fluke/başka termometreyle karşılaştır.");
-            }
-        }).start();
-    }
-
-    /** Tüm hız modlarını (alt 7→1) iki kare boyutunda dener; hangisinde veri geldiğini raporlar. */
-    private void streamTest() {
-        if (busy) { line("Meşgul, bekle..."); return; }
-        UsbDevice t = findTarget();
-        if (t == null || !usb.hasPermission(t)) { line("Akış testi: cihaz yok ya da USB izni yok."); return; }
-        busy = true;
-        line("── AKIŞ TESTİ (yaklaşık 20 sn sürer) ──");
-        new Thread(() -> {
-            int[] frames = {2, 1};
-            int found = -1, foundFrame = -1;
-            for (int fi : frames) {
-                ui("Kare #" + fi + (fi == 2 ? " (256x384)" : " (256x192)") + ":");
-                ThermalSession s = new ThermalSession(usb, t, fi, this::ui);
-                try {
-                    if (s.open(false)) {
-                        int a = s.sweep(1200);
-                        if (a > 0 && found < 0) { found = a; foundFrame = fi; }
-                    }
-                } catch (Throwable e) {
-                    ui("!! HATA (akış testi): " + e.getClass().getSimpleName() + ": " + e.getMessage());
-                } finally {
-                    s.close();
-                }
-                try { Thread.sleep(300); } catch (InterruptedException ignored) {}
-            }
-            if (found > 0) {
-                workingAlt = found;
-                ui("✓ Veri gelen ilk mod: kare #" + foundFrame + " alt=" + found + ". 5/6 numaralı butonlar artık bu alt'ı kullanacak.");
-            } else {
-                ui("✗ Hiçbir modda veri gelmedi. Bu sonucu olduğu gibi gönder.");
-            }
-            busy = false;
-            ui("AKIŞ TESTİ BİTTİ. \"Paylaş\" ile gönder.");
-        }).start();
-    }
-
-    private void toggleLive() {
-        if (live) { live = false; return; }
-        if (busy) { line("Meşgul, bekle..."); return; }
-        UsbDevice t = findTarget();
-        if (t == null || !usb.hasPermission(t)) { line("Canlı: cihaz yok ya da USB izni yok."); return; }
-        live = true;
-        busy = true;
-        liveBtn.setText("6. Canlı ■");
-        line("── CANLI MOD başladı (durdurmak için tekrar bas) ──");
-        new Thread(() -> {
-            ThermalSession s = new ThermalSession(usb, t, 2, this::ui);
-            s.forceAlt = workingAlt;
-            int ok = 0, fail = 0;
-            try {
-                if (s.open()) {
-                    while (live) {
-                        s.heartbeatIfDue();
-                        byte[] f = s.grabFrame(2000);
-                        if (f == null) { if (++fail >= 5) { ui("!! 5 kare üst üste alınamadı, durduruldu."); break; } continue; }
-                        ok++;
-                        show(ThermalSession.analyze(f));
-                    }
-                }
-            } catch (Throwable e) {
-                ui("!! HATA (canlı): " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            } finally {
-                s.close();
-                live = false;
-                busy = false;
-                int fOk = ok, fFail = fail;
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(PermissionRequest req) {
                 runOnUiThread(() -> {
-                    liveBtn.setText("6. Canlı ▶");
-                    line("Canlı mod bitti. Başarılı kare=" + fOk + "  başarısız=" + fFail);
+                    if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                        req.grant(req.getResources());
+                    } else {
+                        pendingWebPerm = req;
+                        requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_PERM_WEB);
+                    }
                 });
             }
-        }).start();
-    }
 
-    private void show(ThermalSession.Result r) {
-        runOnUiThread(() -> {
-            if (Double.isNaN(r.centerC)) {
-                tempView.setText("Sıcaklık verisi yok");
-            } else {
-                tempView.setText(String.format(Locale.US, "Merkez: %.1f °C", r.centerC));
-                statView.setText(String.format(Locale.US, "min %.1f   maks %.1f   ort %.1f   (ham %d)",
-                        r.minC, r.maxC, r.avgC, r.centerRaw));
+            @Override
+            public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
+                if (fileCb != null) fileCb.onReceiveValue(null);
+                fileCb = cb;
+                try {
+                    Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType("*/*");
+                    startActivityForResult(Intent.createChooser(i, "Dosya seç"), REQ_FILE);
+                } catch (Throwable t) {
+                    fileCb = null;
+                    return false;
+                }
+                return true;
             }
-            if (r.thermal != null) imgThermal.setImageBitmap(r.thermal);
-            if (r.image != null) imgImage.setImageBitmap(r.image);
         });
+
+        web.loadUrl(URL);
     }
 
-    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
-
-    private void line(String s) {
-        log.append(tf.format(new Date())).append("  ").append(s).append('\n');
-        logView.setText(log);
-        scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
-    }
-
-    private void err(String where, Throwable e) {
-        line("!! HATA (" + where + "): " + e.getClass().getSimpleName() + ": " + e.getMessage());
-    }
-
-    // ---------------- Bilgi ----------------
-
-    private void header() {
-        String ver = "?";
-        try { ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Throwable ignored) {}
-        line("Termal Kamera Tanı  sürüm " + ver);
-        line("Telefon: " + Build.MANUFACTURER + " " + Build.MODEL + "  (" + Build.DEVICE + ")");
-        line("Android " + Build.VERSION.RELEASE + "  (API " + Build.VERSION.SDK_INT + ")  hedef API " + getApplicationInfo().targetSdkVersion);
-        String os = sysProp("ro.build.version.opporom");
-        if (os.isEmpty()) os = sysProp("ro.build.version.oplusrom");
-        if (!os.isEmpty()) line("ColorOS: " + os);
-        line("USB host desteği: " + getPackageManager().hasSystemFeature(PackageManager.FEATURE_USB_HOST)
-                + "   harici kamera özelliği: " + getPackageManager().hasSystemFeature("android.hardware.camera.external"));
-        line("Kamera (CAMERA) izni: " + (camGranted() ? "VAR" : "YOK"));
-    }
-
-    private String sysProp(String key) {
+    private boolean isOnline() {
         try {
-            Class<?> c = Class.forName("android.os.SystemProperties");
-            Object v = c.getMethod("get", String.class).invoke(null, key);
-            return v == null ? "" : v.toString();
-        } catch (Throwable e) {
-            return "";
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            NetworkInfo n = cm.getActiveNetworkInfo();
+            return n != null && n.isConnected();
+        } catch (Throwable t) {
+            return true;
         }
-    }
-
-    private boolean camGranted() {
-        return checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
-    }
-
-    // ---------------- 1. Tarama ----------------
-
-    private void scan() {
-        HashMap<String, UsbDevice> m = usb.getDeviceList();
-        line("── USB TARAMA ── bulunan cihaz: " + m.size());
-        if (m.isEmpty()) {
-            line("  Hiç USB cihaz yok. Kamera takılı mı? Oppo'da Ayarlar → Ek ayarlar → OTG bağlantısı AÇIK olmalı (10 dk sonra kendiliğinden kapanır).");
-        }
-        for (UsbDevice d : m.values()) describe(d);
-        UsbDevice t = findTarget();
-        if (t != null) line("Hedef cihaz: " + devName(t) + (t.getVendorId() == FLUKE_VID ? "  ← Fluke" : ""));
-        camera2Check();
-    }
-
-    private void describe(UsbDevice d) {
-        line("CİHAZ " + devName(d));
-        String mf = "?", pr = "?";
-        try { mf = String.valueOf(d.getManufacturerName()); } catch (Throwable ignored) {}
-        try { pr = String.valueOf(d.getProductName()); } catch (Throwable ignored) {}
-        line("  üretici: " + mf + "   ürün: " + pr);
-        line("  cihaz sınıfı: " + d.getDeviceClass() + "/" + d.getDeviceSubclass() + "/" + d.getDeviceProtocol()
-                + "   izin: " + (usb.hasPermission(d) ? "VAR" : "YOK"));
-        for (int k = 0; k < d.getInterfaceCount(); k++) {
-            UsbInterface f = d.getInterface(k);
-            line(String.format(Locale.US, "  arayüz #%d alt=%d sınıf=%d/%d/%d %s  uç nokta=%d",
-                    f.getId(), f.getAlternateSetting(), f.getInterfaceClass(), f.getInterfaceSubclass(),
-                    f.getInterfaceProtocol(), UvcParser.ifaceName(f.getInterfaceClass(), f.getInterfaceSubclass()),
-                    f.getEndpointCount()));
-            for (int e = 0; e < f.getEndpointCount(); e++) {
-                UsbEndpoint ep = f.getEndpoint(e);
-                line(String.format(Locale.US, "     uç 0x%02x %s %s paket=%d",
-                        ep.getAddress(), ep.getDirection() == UsbConstants.USB_DIR_IN ? "IN " : "OUT",
-                        UvcParser.epType(ep.getType()), ep.getMaxPacketSize()));
-            }
-        }
-    }
-
-    private void camera2Check() {
-        try {
-            CameraManager cm = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
-            String[] ids = cm.getCameraIdList();
-            StringBuilder s = new StringBuilder();
-            boolean ext = false;
-            for (String id : ids) {
-                Integer f = cm.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING);
-                String n = f == null ? "?" : f == CameraCharacteristics.LENS_FACING_FRONT ? "ön"
-                        : f == CameraCharacteristics.LENS_FACING_BACK ? "arka" : "HARİCİ";
-                if (f != null && f == CameraCharacteristics.LENS_FACING_EXTERNAL) ext = true;
-                s.append(id).append('=').append(n).append("  ");
-            }
-            line("Camera2 kameraları: " + s);
-            if (ext) line("  ✓ Harici kamera Camera2'de görünüyor → USB kamera normal kamera API'siyle de açılabilir.");
-        } catch (Throwable e) {
-            err("Camera2", e);
-        }
-    }
-
-    // ---------------- 2. CAMERA izni ----------------
-
-    private void requestCameraPerm() {
-        if (camGranted()) {
-            line("Kamera izni zaten VAR. Sıradaki adım: 3. USB izni");
-            return;
-        }
-        line("Kamera izni isteniyor...");
-        requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAMERA);
     }
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
         super.onRequestPermissionsResult(code, perms, res);
-        if (code != REQ_CAMERA) return;
-        boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
-        line("Kamera izni sonucu: " + (ok ? "VERİLDİ. Sıradaki adım: 3. USB izni" : "REDDEDİLDİ"));
-    }
-
-    // ---------------- 3. USB izni ----------------
-
-    private void registerUsbReceiver() {
-        IntentFilter f = new IntentFilter(ACTION_USB_PERMISSION);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(usbReceiver, f, Context.RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(usbReceiver, f);
-        }
-        receiverRegistered = true;
-    }
-
-    private void requestUsbPerm() {
-        UsbDevice t = findTarget();
-        if (t == null) {
-            line("USB izni: cihaz bulunamadı. Önce kamerayı tak ve 1. Tara'ya bas.");
-            return;
-        }
-        if (usb.hasPermission(t)) {
-            line("USB izni zaten VAR. Sıradaki adım: 4. Aç ve oku");
-            return;
-        }
-        boolean cam = camGranted();
-        line("Kamera izni durumu: " + (cam ? "VAR" : "YOK  ← UYARI: önce 2. adımı yap, yoksa sistem reddedebilir"));
-        Intent i = new Intent(ACTION_USB_PERMISSION);
-        i.setPackage(getPackageName());
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= 31) flags |= PendingIntent.FLAG_MUTABLE;
-        PendingIntent pi = PendingIntent.getBroadcast(this, 0, i, flags);
-        line("USB izni isteniyor → " + devName(t) + "  (izin cevabı " + (Build.VERSION.SDK_INT >= 31 ? "MUTABLE" : "standart") + " PendingIntent ile)");
-        line("  Ekranda izin penceresi çıkarsa \"Tamam/İzin ver\" de.");
-        usbRequestTime = SystemClock.elapsedRealtime();
-        usb.requestPermission(t, pi);
-    }
-
-    // ---------------- 4. Aç ve oku ----------------
-
-    private void openAndRead() {
-        UsbDevice t = findTarget();
-        if (t == null) {
-            line("Aç ve oku: cihaz yok.");
-            return;
-        }
-        if (!usb.hasPermission(t)) {
-            line("Aç ve oku: USB izni YOK. Önce 2 ve 3. adımları yap.");
-            return;
-        }
-        UsbDeviceConnection c = usb.openDevice(t);
-        if (c == null) {
-            line("!! openDevice() boş döndü: izin olmasına rağmen cihaz açılamadı (başka uygulama tutuyor olabilir).");
-            return;
-        }
-        try {
-            line("── KAMERA AÇILDI ── " + devName(t));
-            try { line("  seri no: " + c.getSerial()); } catch (Throwable ignored) {}
-            byte[] raw = c.getRawDescriptors();
-            if (raw == null) {
-                line("!! Ham descriptor okunamadı.");
-                return;
-            }
-            line("  ham descriptor: " + raw.length + " byte");
-            UvcParser.Result r = UvcParser.parse(raw);
-            log.append(r.text);
-            logView.setText(log);
-
-            for (int ifNum : r.vsInterfaces) probe(c, ifNum);
-
-            line("── YORUM ──");
-            if (r.hints.isEmpty()) line("  (özel bir işaret bulunamadı)");
-            for (String h : r.hints) line("  • " + h);
-
-            line("── HAM HEX (bana gönderdiğinde ben de inceleyeceğim) ──");
-            log.append(hex(raw)).append('\n');
-            logView.setText(log);
-            line("BİTTİ. Şimdi \"Paylaş\" ile sonucu gönder.");
-        } catch (Throwable e) {
-            err("aç ve oku", e);
-        } finally {
-            c.close();
+        if (code == REQ_PERM_WEB && pendingWebPerm != null) {
+            if (res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) pendingWebPerm.grant(pendingWebPerm.getResources());
+            else pendingWebPerm.deny();
+            pendingWebPerm = null;
         }
     }
 
-    /** UVC VS_PROBE_CONTROL: kameranın şu anki/en büyük kare ayarını sorar. */
-    private void probe(UsbDeviceConnection c, int ifNum) {
-        int[] reqs = {0x81, 0x83};   // GET_CUR, GET_MAX
-        String[] names = {"GET_CUR", "GET_MAX"};
-        for (int k = 0; k < reqs.length; k++) {
-            byte[] b = new byte[34];
-            int n = c.controlTransfer(0xA1, reqs[k], 0x0100, ifNum, b, b.length, 1000);
-            if (n < 26) {
-                line(String.format(Locale.US, "  PROBE %s arayüz #%d → yanıt yok (%d)", names[k], ifNum, n));
-                continue;
-            }
-            line(String.format(Locale.US, "  PROBE %s arayüz #%d → format #%d kare #%d  %s  maks kare=%d byte  maks paket=%d byte",
-                    names[k], ifNum, UvcParser.u8(b, 2), UvcParser.u8(b, 3),
-                    UvcParser.u32(b, 4) > 0 ? String.format(Locale.US, "%.1ffps", 1e7 / UvcParser.u32(b, 4)) : "?",
-                    UvcParser.u32(b, 18), UvcParser.u32(b, 22)));
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == REQ_FILE) {
+            if (fileCb != null) fileCb.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(res, data));
+            fileCb = null;
+        } else if (req == REQ_CAM && res == RESULT_OK && data != null) {
+            double t = data.getDoubleExtra(CameraActivity.EXTRA_TEMP, Double.NaN);
+            if (Double.isNaN(t)) return;
+            String js = String.format(Locale.US,
+                    "window.kameraSonuc?window.kameraSonuc(%.1f,%s):alert('Kamera degeri: %.1f °C (Termal Takip guncel degil)')",
+                    t, JSONObject.quote(camTarget), t);
+            web.evaluateJavascript(js, null);
         }
     }
 
-    // ---------------- Takma ile açılış ----------------
-
-    private void handleIntent(Intent i, String src) {
-        if (i == null || !UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(i.getAction())) return;
-        UsbDevice d = deviceExtra(i);
-        line("── Uygulama kamera takılınca açıldı (" + src + ") ── " + (d == null ? "" : devName(d)));
-        if (d != null && usb.hasPermission(d)) {
-            line("  ✓ Takma onayı ile USB izni OTOMATİK verildi. Kamera okunuyor...");
-            openAndRead();
-        } else {
-            line("  Takma ile açıldı ama izin yok. Açılan pencerede bu uygulamayı seçip onaylaman gerekiyor.");
-        }
+    @Override
+    public void onBackPressed() {
+        if (web.canGoBack()) { web.goBack(); return; }
+        long now = System.currentTimeMillis();
+        if (now - lastBack < 2000) { super.onBackPressed(); return; }
+        lastBack = now;
+        Toast.makeText(this, "Çıkmak için tekrar bas", Toast.LENGTH_SHORT).show();
     }
 
-    // ---------------- Yardımcılar ----------------
+    // ---------------- JS köprüsü ----------------
 
-    private UsbDevice findTarget() {
-        HashMap<String, UsbDevice> m = usb.getDeviceList();
-        for (UsbDevice d : m.values()) if (d.getVendorId() == FLUKE_VID) return d;
-        for (UsbDevice d : m.values()) {
-            if (d.getDeviceClass() == 14 || d.getDeviceClass() == 0xEF) {
-                for (int k = 0; k < d.getInterfaceCount(); k++) {
-                    if (d.getInterface(k).getInterfaceClass() == 14) return d;
+    class Bridge {
+        @JavascriptInterface
+        public void olc(String hedefId, String tagAdi) {
+            runOnUiThread(() -> {
+                camTarget = (hedefId == null || hedefId.isEmpty()) ? "kayitTemp" : hedefId;
+                Intent i = new Intent(MainActivity.this, CameraActivity.class);
+                i.putExtra(CameraActivity.EXTRA_TAG, tagAdi == null ? "" : tagAdi);
+                startActivityForResult(i, REQ_CAM);
+            });
+        }
+
+        @JavascriptInterface
+        public void tani() {
+            runOnUiThread(() -> startActivity(new Intent(MainActivity.this, TaniActivity.class)));
+        }
+
+        @JavascriptInterface
+        public String surum() {
+            try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Throwable t) { return "?"; }
+        }
+
+        @JavascriptInterface
+        public void saveFile(String name, String mime, String b64) {
+            try {
+                byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                String safe = name.replaceAll("[\\\\/:*?\"<>|]", "_");
+                Uri uri = null;
+                String where;
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues v = new ContentValues();
+                    v.put(MediaStore.MediaColumns.DISPLAY_NAME, safe);
+                    v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                    v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/TermalTakip");
+                    uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                    if (uri == null) throw new IllegalStateException("Dosya oluşturulamadı");
+                    try (OutputStream o = getContentResolver().openOutputStream(uri)) { o.write(data); }
+                    where = "İndirilenler/TermalTakip/" + safe;
+                } else {
+                    File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                    File f = new File(dir, safe);
+                    try (FileOutputStream o = new FileOutputStream(f)) { o.write(data); }
+                    where = f.getAbsolutePath();
                 }
-            }
-            for (int k = 0; k < d.getInterfaceCount(); k++) {
-                if (d.getInterface(k).getInterfaceClass() == 14) return d;
+                final Uri fu = uri;
+                final String fw = where;
+                runOnUiThread(() -> savedDialog(fw, fu, mime));
+            } catch (Throwable t) {
+                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Kaydetme hatası: " + t.getMessage(), Toast.LENGTH_LONG).show());
             }
         }
-        for (UsbDevice d : m.values()) return d;
-        return null;
     }
 
-    @SuppressWarnings("deprecation")
-    private static UsbDevice deviceExtra(Intent i) {
-        if (Build.VERSION.SDK_INT >= 33) return i.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice.class);
-        return i.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-    }
-
-    private static String devName(UsbDevice d) {
-        return String.format(Locale.US, "VID=%04x PID=%04x (%s)", d.getVendorId(), d.getProductId(), d.getDeviceName());
-    }
-
-    private static String hex(byte[] b) {
-        StringBuilder s = new StringBuilder();
-        for (int i = 0; i < b.length; i++) {
-            if (i % 16 == 0) s.append(String.format(Locale.US, "%n%04x: ", i));
-            s.append(String.format(Locale.US, "%02x ", b[i] & 0xFF));
+    private void savedDialog(String where, Uri uri, String mime) {
+        AlertDialog.Builder d = new AlertDialog.Builder(this)
+                .setTitle("Dosya kaydedildi")
+                .setMessage(where)
+                .setNegativeButton("Tamam", null);
+        if (uri != null) {
+            d.setPositiveButton("Aç", (x, y) -> {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW);
+                    i.setDataAndType(uri, mime);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    startActivity(i);
+                } catch (Throwable t) {
+                    Toast.makeText(this, "Açacak uygulama bulunamadı", Toast.LENGTH_SHORT).show();
+                }
+            });
+            d.setNeutralButton("Paylaş", (x, y) -> {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType(mime);
+                i.putExtra(Intent.EXTRA_STREAM, uri);
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(i, "Paylaş"));
+            });
         }
-        return s.toString();
+        d.show();
     }
 
-    private void share() {
-        Intent s = new Intent(Intent.ACTION_SEND);
-        s.setType("text/plain");
-        s.putExtra(Intent.EXTRA_SUBJECT, "Termal kamera tanı sonucu");
-        s.putExtra(Intent.EXTRA_TEXT, log.toString());
-        startActivity(Intent.createChooser(s, "Sonucu paylaş"));
-    }
-
-    private void copy() {
-        ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        cb.setPrimaryClip(ClipData.newPlainText("tani", log.toString()));
-        Toast.makeText(this, "Kopyalandı", Toast.LENGTH_SHORT).show();
+    @Override
+    protected void onDestroy() {
+        if (web != null) web.destroy();
+        super.onDestroy();
     }
 }

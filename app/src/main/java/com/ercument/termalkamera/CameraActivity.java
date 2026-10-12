@@ -37,7 +37,8 @@ public class CameraActivity extends Activity {
     static volatile boolean exists;
     private static final Object USB_LOCK = new Object();
     private final StringBuilder logBuf = new StringBuilder();
-    private boolean rotated;
+    private int rotDeg = 90;        // sensör yatay, telefon dikey → varsayılan 90°
+    private boolean mirror;
 
     private UsbManager usb;
     private ImageView img;
@@ -53,7 +54,10 @@ public class CameraActivity extends Activity {
         super.onCreate(b);
         exists = true;
         usb = (UsbManager) getSystemService(Context.USB_SERVICE);
-        try { rotated = getSharedPreferences("kamera", 0).getBoolean("rotated", false); } catch (Throwable ignored) {}
+        try {
+            rotDeg = getSharedPreferences("kamera", 0).getInt("rotDeg", 90);
+            mirror = getSharedPreferences("kamera", 0).getBoolean("mirror", false);
+        } catch (Throwable ignored) {}
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildUi(getIntent().getStringExtra(EXTRA_TAG));
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -121,24 +125,53 @@ public class CameraActivity extends Activity {
         tani.setText("Tanı");
         tani.setOnClickListener(v -> startActivity(new Intent(this, TaniActivity.class)));
         Button rot = new Button(this);
-        rot.setText("Döndür");
+        rot.setText("↻ " + rotDeg + "°");
         rot.setOnClickListener(v -> {
-            rotated = !rotated;
-            img.setRotation(rotated ? 180f : 0f);
-            try { getSharedPreferences("kamera", 0).edit().putBoolean("rotated", rotated).apply(); } catch (Throwable ignored) {}
+            rotDeg = (rotDeg + 90) % 360;
+            rot.setText("↻ " + rotDeg + "°");
+            saveOrient();
+            redraw();
+        });
+        Button mir = new Button(this);
+        mir.setText(mirror ? "Ayna ✓" : "Ayna");
+        mir.setOnClickListener(v -> {
+            mirror = !mirror;
+            mir.setText(mirror ? "Ayna ✓" : "Ayna");
+            saveOrient();
+            redraw();
         });
         Button logBtn = new Button(this);
         logBtn.setText("Log");
         logBtn.setOnClickListener(v -> showLog());
-        row.addView(cancel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f));
-        row.addView(rot, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.4f));
+        row.addView(cancel, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.4f));
+        row.addView(rot, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f));
+        row.addView(mir, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f));
         row.addView(logBtn, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(tani, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(row);
 
-        img.setRotation(rotated ? 180f : 0f);
         setContentView(root);
     }
+
+    // ---------------- Yön ----------------
+
+    private android.graphics.Bitmap lastRaw;
+
+    private void saveOrient() {
+        try { getSharedPreferences("kamera", 0).edit().putInt("rotDeg", rotDeg).putBoolean("mirror", mirror).apply(); } catch (Throwable ignored) {}
+        log("yön: " + rotDeg + "° ayna=" + mirror);
+    }
+
+    /** Görüntüyü döndürür/aynalar. Merkez noktası (ölçülen yer) değişmez. */
+    private android.graphics.Bitmap orient(android.graphics.Bitmap b) {
+        if (b == null || (rotDeg == 0 && !mirror)) return b;
+        android.graphics.Matrix m = new android.graphics.Matrix();
+        if (mirror) m.postScale(-1, 1);
+        m.postRotate(rotDeg);
+        return android.graphics.Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+    }
+
+    private void redraw() { if (lastRaw != null) img.setImageBitmap(orient(lastRaw)); }
 
     // ---------------- Log ----------------
 
@@ -290,7 +323,7 @@ public class CameraActivity extends Activity {
     private void show(ThermalSession.Result r) {
         tempView.setText(String.format(Locale.US, "%.1f °C", r.centerC));
         statView.setText(String.format(Locale.US, "görüntüde min %.1f  ·  maks %.1f °C", r.minC, r.maxC));
-        if (r.thermal != null) img.setImageBitmap(r.thermal);
+        if (r.thermal != null) { lastRaw = r.thermal; img.setImageBitmap(orient(r.thermal)); }
         if (!takeBtn.isEnabled()) takeBtn.setEnabled(true);
         if (statusView.getText().length() > 0) statusView.setText("");
     }

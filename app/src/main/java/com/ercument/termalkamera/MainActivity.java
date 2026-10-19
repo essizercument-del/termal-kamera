@@ -49,6 +49,13 @@ public class MainActivity extends Activity {
     private String camTarget = "kayitTemp";
     private boolean triedCache;
     private long lastBack;
+    /** Sayfanın en son ağdan (ya da önbellekten) yüklendiği an */
+    private long loadedAt;
+    private boolean loadedFromCache;
+    /** Kamera/dosya seçiciden dönerken yenileme yapma (alana yazılan değer kaybolmasın) */
+    private boolean skipNextReload;
+    private long pausedAt;
+    static final long STALE_MS = 20 * 60 * 1000L;
 
     /** blob:/data: indirmelerini yakalayıp yerel dosyaya yazdırır (a.click, dispatchEvent ve tıklama) */
     private static final String DL_JS =
@@ -78,13 +85,16 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(false);
         s.setUserAgentString(s.getUserAgentString() + " TermalKameraApp/1");
-        s.setCacheMode(isOnline() ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
+        boolean online = isOnline();
+        s.setCacheMode(online ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
+        loadedFromCache = !online;
 
         web.addJavascriptInterface(new Bridge(), "TermalKamera");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView v, String url) {
                 v.evaluateJavascript(DL_JS, null);
+                loadedAt = System.currentTimeMillis();
             }
 
             @Override
@@ -101,6 +111,7 @@ public class MainActivity extends Activity {
                 if (r.isForMainFrame() && !triedCache) {
                     // İnternet yoksa en son açılan sürümü önbellekten aç
                     triedCache = true;
+                    loadedFromCache = true;
                     v.getSettings().setCacheMode(WebSettings.LOAD_CACHE_ELSE_NETWORK);
                     v.loadUrl(URL);
                 }
@@ -127,6 +138,7 @@ public class MainActivity extends Activity {
                     Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                     i.addCategory(Intent.CATEGORY_OPENABLE);
                     i.setType("*/*");
+                    skipNextReload = true;
                     startActivityForResult(Intent.createChooser(i, "Dosya seç"), REQ_FILE);
                 } catch (Throwable t) {
                     fileCb = null;
@@ -176,6 +188,32 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onPause() {
+        pausedAt = System.currentTimeMillis();
+        super.onPause();
+    }
+
+    /**
+     * Uygulama günlerce arka planda açık kalabiliyor; sayfa o süre boyunca eski sürümde kalıyordu.
+     * Öne gelince: 20 dk'dan uzun arka planda kaldıysa ya da internetsiz (önbellekten) açılmışsa ve
+     * şimdi internet varsa → güncel sürümü yükle. Kamera/dosya seçiciden dönüşte yenileme yok.
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (skipNextReload) { skipNextReload = false; return; }
+        if (web == null || loadedAt == 0) return;
+        long now = System.currentTimeMillis();
+        boolean stale = pausedAt > 0 && now - pausedAt > STALE_MS;
+        if ((stale || loadedFromCache) && isOnline()) {
+            loadedFromCache = false;
+            triedCache = false;
+            web.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
+            web.loadUrl(URL);
+        }
+    }
+
+    @Override
     public void onBackPressed() {
         if (web.canGoBack()) { web.goBack(); return; }
         long now = System.currentTimeMillis();
@@ -193,6 +231,7 @@ public class MainActivity extends Activity {
                 camTarget = (hedefId == null || hedefId.isEmpty()) ? "kayitTemp" : hedefId;
                 Intent i = new Intent(MainActivity.this, CameraActivity.class);
                 i.putExtra(CameraActivity.EXTRA_TAG, tagAdi == null ? "" : tagAdi);
+                skipNextReload = true;
                 startActivityForResult(i, REQ_CAM);
             });
         }
